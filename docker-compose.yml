@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aukse}
+      POSTGRES_USER: ${POSTGRES_USER:-aukse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aukse} -d ${POSTGRES_DB:-aukse}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  api:
+    build:
+      context: ../aukse-api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # DATABASE_URL is constructed here so the app connects to the postgres container.
+      # Other vars (CLERK_*, PORT, NODE_ENV) come from env_file above.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aukse}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-aukse}
+      NODE_ENV: production
+      PORT: "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - internal
+
+  web:
+    build:
+      context: ../aukse-web
+      dockerfile: Dockerfile
+      args:
+        # VITE_ vars are baked into the JS bundle at build time.
+        VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY}
+        VITE_API_URL: ${VITE_API_URL:-https://api.aukse.app}
+    restart: unless-stopped
+    networks:
+      - internal
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Let's Encrypt certs — populated by certbot on the host
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # Certbot ACME challenge webroot
+      - certbot_www:/var/www/certbot:ro
+    depends_on:
+      - api
+      - web
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+  certbot_www:
+
+networks:
+  internal:
+    driver: bridge
